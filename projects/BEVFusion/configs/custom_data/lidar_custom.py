@@ -24,7 +24,7 @@ num_proposals = 500
 
 metainfo = dict(classes=class_names)
 dataset_type = 'CustomDataset'
-data_root = 'data/xbzl_data/'
+data_root = 'data/custom/'
 data_prefix = dict(pts='', 
                    CAM_0='',
                    CAM_1='', 
@@ -223,8 +223,8 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=6,
-    num_workers=24,
+    batch_size=4,
+    num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
@@ -277,7 +277,8 @@ visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 
 # learning rate
-lr = 0.0001
+#lr = 0.0001
+lr = lr = 1.67e-5
 param_scheduler = [
     # learning rate scheduler
     # During the first 8 epochs, learning rate increases from 0 to lr * 10
@@ -321,14 +322,16 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=2)
 val_cfg = dict()
 test_cfg = dict()
 
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=lr, weight_decay=0.01),
-    clip_grad=dict(max_norm=35, norm_type=2))
+    clip_grad=dict(max_norm=35, norm_type=2),
+    # accumulative_counts = 6
+    )
 
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
@@ -338,8 +341,11 @@ auto_scale_lr = dict(enable=False, base_batch_size=32)
 log_processor = dict(window_size=50)
 
 default_hooks = dict(
-    logger=dict(type='LoggerHook', interval=10),
-    checkpoint=dict(type='CheckpointHook', interval=10))
+    logger=dict(type='LoggerHook', interval=5),
+    checkpoint=dict(type='CheckpointHook', interval=2),
+  )
 custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=15)]
-load_from  = '/home/zqh/project/autoware-ml/work_dirs/mmdet3d_official/bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d-2628f933.pth'
-work_dir = '/home/zqh/project/mmdetection3d/work_dirs/lidar_custom_1110'
+
+
+#load_from  = '/home/liujie/code/ADML3D-main/data/pre-model/bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d-2628f933.pth'
+# work_dir = '/home/zqh/project/mmdetection3d/work_dirs/lidar_custom_1110'

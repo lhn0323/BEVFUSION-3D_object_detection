@@ -31,9 +31,10 @@ model = dict(
         convert_weights=True,
         init_cfg=dict(
             type='Pretrained',
-            checkpoint=  # noqa: E251
-            "/home/zqh/project/autoware-ml/work_dirs/mmdet3d_official/swint-nuimages-pretrained.pth"  # noqa: E501
-        )),
+            checkpoint=  "/home/liujie/code/ADML3D-main/data/pre-model/swint-nuimages-pretrained.pth" # noqa: E501
+        )
+         # init_cfg= None
+        ),
     img_neck=dict(
         type='GeneralizedLSSFPN',
         in_channels=[192, 384, 768],
@@ -214,13 +215,14 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=6)
+train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=1)
 val_cfg = dict()
 test_cfg = dict()
 
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='AdamW', lr=0.0002, weight_decay=0.01),
+    # 原来0.0002
+    optimizer=dict(type='AdamW', lr=0.00005, weight_decay=0.01),
     clip_grad=dict(max_norm=35, norm_type=2))
 
 # Default setting for scaling LR automatically
@@ -230,9 +232,9 @@ optim_wrapper = dict(
 auto_scale_lr = dict(enable=False, base_batch_size=32)
 
 default_hooks = dict(
-    logger=dict(type='LoggerHook', interval=50),
-    checkpoint=dict(type='CheckpointHook', interval=6))
+    logger=dict(type='LoggerHook', interval=5),
+    checkpoint=dict(type='CheckpointHook', interval=2))
 del _base_.custom_hooks
 work_dir = './work_dirs/lidar-cam_custom_1110'
-load_from = '/home/zqh/project/mmdetection3d/work_dirs/lidar_custom_1110/epoch_20.pth'
+load_from = 'work_dirs/bevfusion_lidar/epoch_5.pth'
 # load_from = '/home/zqh/project/autoware-ml/work_dirs/nus_lidar_cam_4dim_load_from_lyft_epoch_2_7class_nodepth_loss/epoch_3.pth'

@@ -47,17 +47,17 @@ class BaseViewTransform(nn.Module):
         self.D = self.frustum.shape[0]
         self.fp16_enabled = False
 
-    def create_frustum(self):
-        iH, iW = self.image_size
-        fH, fW = self.feature_size
+    def create_frustum(self): #创建视锥空间视，锥体（frustum）通常用于表示从相机视角看到的三维空间
+        iH, iW = self.image_size  # 图像的高度和宽度
+        fH, fW = self.feature_size  # 特征图的高度和宽度
 
-        ds = torch.arange(*self.dbound, dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
+        ds = torch.arange(*self.dbound, dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW) #创建一个深度的张量 ds，它是从 self.dbound 范围内均匀生成的深度值，并将其扩展到特征图的宽高维度 fH x fW
         D, _, _ = ds.shape
 
-        xs = torch.linspace(0, iW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)
+        xs = torch.linspace(0, iW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW) 
         ys = torch.linspace(0, iH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)
 
-        frustum = torch.stack((xs, ys, ds), -1)
+        frustum = torch.stack((xs, ys, ds), -1)  #构成一个形状为 (D, fH, fW, 3) 的张量，表示每个深度值对应的 3D 坐标（x, y, z）
         return nn.Parameter(frustum, requires_grad=False)
 
     def get_geometry(
@@ -332,36 +332,38 @@ class BaseDepthTransform(BaseViewTransform):
     ):
         post_trans = img_aug_matrix[..., :3, 3]
         camera2lidar_rots = camera2lidar[..., :3, :3]
-        camera2lidar_trans = camera2lidar[..., :3, 3]
+        camera2lidar_trans = camera2lidar[..., :3, 3] #从增强矩阵和相机到激光雷达的变换矩阵中提取出旋转和平移部分，用于后续的变换操作。
 
         if lidar_aug_matrix_inverse is None:
             lidar_aug_matrix_inverse = torch.inverse(lidar_aug_matrix)
 
+        #LiDAR 原始点云数据,points 的关键作用：生成稀疏的真值深度图 (depth)，用于监督模型的深度预测
         batch_size = len(points)
-        depth = torch.zeros(batch_size, img.shape[1], 1, *self.image_size).to(points[0].device)
-        for b in range(batch_size):
-            cur_coords = points[b][:, :3]
+        depth = torch.zeros(batch_size, img.shape[1], 1, *self.image_size).to(points[0].device)  #根初始化一个张量 depth 来保存预测的深度值，在1这个维度体现，张量的大小基于批量大小、图像的高宽和深度通道。
+        for b in range(batch_size):   #这个循环对每个批次中的样本进行处理，提取激光雷达点和变换矩阵,将 LiDAR 点投影到 2D 图像平面
+            cur_coords = points[b][:, :3]    #提取的是 3D 坐标 (x, y, z).points其形状通常是 [B, N, num_points_i, 4]，其中 B 是批次大小，N 是相机数量（例如 5 个），num_points_i 是第 i 个相机视锥体内的点数，4 是坐标维度（x, y, z, 强度/其他特征）。但在 BaseDepthTransform 中，通常是按批次和相机分开处理的点列表。
             cur_img_aug_matrix = img_aug_matrix[b]
             cur_lidar_aug_matrix = lidar_aug_matrix[b]
             cur_lidar2image = lidar2image[b]
 
-            # inverse aug
+            # inverse aug  激光雷达点的逆变换，激光雷达点 cur_coords 先减去激光雷达增强矩阵的平移部分，然后进行旋转变换，使用的是 lidar_aug_matrix_inverse
+            #应用了逆增强矩阵，目的是将这些点从增强后的坐标系（Augmented Coordinates）还原到原始 LiDAR 坐标系，以匹配未增强的相机内外参。
             cur_coords -= cur_lidar_aug_matrix[:3, 3]
             cur_coords = lidar_aug_matrix_inverse[b, :3, :3].matmul(cur_coords.transpose(1, 0))
-            # lidar2image
+            # lidar2image   #将 3D 点从 LiDAR 坐标系变换到相机坐标系，使用了 lidar2image 矩阵进行旋转和平移变换
             cur_coords = cur_lidar2image[:, :3, :3].matmul(cur_coords)
             cur_coords += cur_lidar2image[:, :3, 3].reshape(-1, 3, 1)
-            # get 2d coords
-            dist = cur_coords[:, 2, :]
-            cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 1e5)
-            cur_coords[:, :2, :] /= cur_coords[:, 2:3, :]
+            # get 2d coords  将三维点转换为二维图像坐标。齐次坐标的透视除法
+            dist = cur_coords[:, 2, :]  #提取深度值 [:, 2, :] 提取所有批次、第2个通道（z坐标/深度值）、所有点。提取变换后点的 Z 坐标，这正是点到相机平面的距离，即深度值
+            cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 1e5) #并对深度值进行裁剪，避免除以零的情况
+            cur_coords[:, :2, :] /= cur_coords[:, 2:3, :] #将 3D 坐标 (X, Y, Z) 投影到 2D 齐次坐标 (X/Z, Y/Z, 1).透视除法 cur_coords[:, :2, :]：所有批次、前2个通道（x, y坐标）、所有点；cur_coords[:, 2:3, :]：所有批次、第2个通道（深度z）、所有点（保持维度）；执行除法：(x, y) / z → 完成3D到2D的投影
 
-            # imgaug
+            # imgaug 对坐标进行图像增强操作，再次变换坐标。将 2D 投影坐标应用图像增强矩阵，使坐标与输入图像 img 的增强状态保持一致
             cur_coords = cur_img_aug_matrix[:, :3, :3].matmul(cur_coords)
             cur_coords += cur_img_aug_matrix[:, :3, 3].reshape(-1, 3, 1)
             cur_coords = cur_coords[:, :2, :].transpose(1, 2)
 
-            # normalize coords for grid sample
+            # normalize coords for grid sample 坐标归一化以进行网格采样，交换 x 和 y 坐标，可能是为了匹配图像格式（高×宽），3D点在2D画面的位置
             cur_coords = cur_coords[..., [1, 0]]
 
             on_img = (
@@ -369,7 +371,7 @@ class BaseDepthTransform(BaseViewTransform):
                 & (cur_coords[..., 0] >= 0)
                 & (cur_coords[..., 1] < self.image_size[1])
                 & (cur_coords[..., 1] >= 0)
-            )
+            ) #判断变换后的 2D 点是否落在图像边界内
 
             # NOTE(knzo25): in the original code, a per-image loop was
             # implemented to compute the depth. However, it fixes the number
@@ -379,34 +381,36 @@ class BaseDepthTransform(BaseViewTransform):
             # but the results will change due to indexing having potential
             # duplicates !. In practce, only about 0.01% of the elements will
             # have different results...
+            #在原始代码中，通过针对每帧图像的循环来计算深度。但该方案固定了图像数量，这不符合部署需求（因帧丢失可能导致图像数量变化）。为此我改用张量运算实现，但索引可能存在重复导致结果变化！实际中仅约0.01%的元素会产生差异结果...
 
-            indices = torch.nonzero(on_img, as_tuple=False)
+#对落在图像中的点，将其对应的深度值更新到 depth 张量中
+            indices = torch.nonzero(on_img, as_tuple=False)  #on_img 是一个布尔掩码，标记哪些3D点投影在图像范围内，提取有效投影点的相机索引和点云索引
             camera_indices = indices[:, 0]
             point_indices = indices[:, 1]
 
-            masked_coords = cur_coords[camera_indices, point_indices].long()
-            masked_dist = dist[camera_indices, point_indices]
+            masked_coords = cur_coords[camera_indices, point_indices].long() #投影到图像平面的2D坐标 (x, y)
+            masked_dist = dist[camera_indices, point_indices] #对应的深度值（距离相机的距离）
             depth = depth.to(masked_dist.dtype)
             batch_size, num_imgs, channels, height, width = depth.shape
             # Depth tensor should have only one channel in this implementation
             assert channels == 1
 
-            depth_flat = depth.view(batch_size, num_imgs, channels, -1)
-
+            depth_flat = depth.view(batch_size, num_imgs, channels, -1)  #将深度图展平，便于后续的scatter操作
+            #计算扁平化索引，对于每个投影点：索引 = 相机索引 × (图像高度 × 图像宽度) + 行坐标 × 宽度 + 列坐标。这相当于将多张图像在内存中连续排列，计算每个投影点的绝对位置
             flattened_indices = camera_indices * height * width + masked_coords[:, 0] * width + masked_coords[:, 1]
+            #创建全零的扁平化更新张量；使用 scatter_ 将深度值写入对应位置；dim=0：在第0维度进行scatter操作
+            #将有效的 LiDAR 深度值 (masked_dist) 写入了一个零初始化的张量 depth 中，从而生成了 稀疏的真值深度图
             updates_flat = torch.zeros((num_imgs * channels * height * width), device=depth.device)
-
             updates_flat.scatter_(dim=0, index=flattened_indices, src=masked_dist)
-
+            #将更新后的扁平张量恢复为原始形状
             depth_flat[b] = updates_flat.view(num_imgs, channels, height * width)
-
-            depth = depth_flat.view(batch_size, num_imgs, channels, height, width)
+            depth = depth_flat.view(batch_size, num_imgs, channels, height, width) #此时的depth便为稀疏的真值深度图
 
         extra_rots = lidar_aug_matrix[..., :3, :3]
         extra_trans = lidar_aug_matrix[..., :3, 3]
 
         if geom_feats_precomputed is not None:
-            # In inference, the geom_feats are precomputed
+            # In inference, the geom_feats are precomputed 推理走这个
             geom_feats, kept, ranks, indices, camera_mask = geom_feats_precomputed
             x, est_depth_distr, gt_depth_distr, counts_3d = self.get_cam_feats(img, depth)
 

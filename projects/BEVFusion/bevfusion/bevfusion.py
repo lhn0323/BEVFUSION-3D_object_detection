@@ -39,22 +39,27 @@ class BEVFusion(Base3DDetector):
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
         self.voxelize_reduce = voxelize_cfg.pop("voxelize_reduce")
+        # 把原始点云（N × 4）转成稀疏 voxel 特征 voxelization 层只负责把点云聚簇成 voxel + 记录坐标
         self.pts_voxel_layer = Voxelization(**voxelize_cfg)
-
+        # 把每个 voxel 内部的点特征编码成一个特征向量
         self.pts_voxel_encoder = MODELS.build(pts_voxel_encoder)
 
+        # 从多相机 RGB 图像中提取特征backbone输出多层 feature maps swin transformer or resnet
         self.img_backbone = MODELS.build(img_backbone) if img_backbone is not None else None
+        # 在 backbone 的多尺度输出上做融合 / 上/下采样（例如 FPN）GeneralizedLSSFPN
         self.img_neck = MODELS.build(img_neck) if img_neck is not None else None
+        # 核心模块把图像特征投影到 BEV 基于深度估计 + 相机内参 + 外参将多摄像头 2D 特征 warp 到 BEV 平面上 默认通道 = 80
         self.view_transform = MODELS.build(view_transform) if view_transform is not None else None
+        # 点云稀疏体素卷积中间编码器 使用 SparseConvNet 处理稀疏 voxel输出 BEV 特征图 (HxW, C=256)对应 fusion_layer 的输入部分。
         self.pts_middle_encoder = MODELS.build(pts_middle_encoder)
-
+        # 融合模块（图像 BEV + 点云 BEV)
         self.fusion_layer = MODELS.build(fusion_layer) if fusion_layer is not None else None
-
+        # 用 PointPillars/SECOND 的2D CNN进一步提取 BEV 特征
         self.pts_backbone = MODELS.build(pts_backbone)
         self.pts_neck = MODELS.build(pts_neck)
-
+        # 负责检测（分类 + 回归）
         self.bbox_head = MODELS.build(bbox_head)
-
+        # 主要为 img_backbone 加载预训练权重
         self.init_weights()
 
     def _forward(self, batch_inputs_dict: Tensor, batch_data_samples: OptSampleList = None, **kwargs):
@@ -111,6 +116,12 @@ class BEVFusion(Base3DDetector):
     def init_weights(self) -> None:
         if self.img_backbone is not None and self.img_backbone.init_cfg.checkpoint is not None:
             self.img_backbone.init_weights()
+    # def init_weights(self) -> None:
+    #     if self.img_backbone is not None:
+    #     # 安全判断 init_cfg
+    #        init_cfg = getattr(self.img_backbone, 'init_cfg', None)
+    #        if init_cfg is not None and getattr(init_cfg, 'checkpoint', None) is not None:
+    #            self.img_backbone.init_weights()
 
     @property
     def with_bbox_head(self):
@@ -267,8 +278,8 @@ class BEVFusion(Base3DDetector):
         batch_input_metas,
         **kwargs,
     ):
-        imgs = batch_inputs_dict.get("imgs", None)
-        points = batch_inputs_dict.get("points", None)
+        imgs = batch_inputs_dict.get("imgs", None)# torch.Size([1, 5, 3, 384, 704])
+        points = batch_inputs_dict.get("points", None)# points[0].shape torch.Size([170579, 3])
         features = []
         depth_loss = 0.0
 
@@ -277,13 +288,14 @@ class BEVFusion(Base3DDetector):
             imgs = imgs.contiguous()
             lidar2image, camera_intrinsics, camera2lidar = [], [], []
             img_aug_matrix, lidar_aug_matrix = [], []
+            # 读取每个 sample 的标定矩阵
             for i, meta in enumerate(batch_input_metas):
                 lidar2image.append(meta["lidar2img"])
                 camera_intrinsics.append(meta["cam2img"])
                 camera2lidar.append(meta["cam2lidar"])
                 img_aug_matrix.append(meta.get("img_aug_matrix", np.eye(4)))
                 lidar_aug_matrix.append(meta.get("lidar_aug_matrix", np.eye(4)))
-
+            # 转成 tensor
             lidar2image = imgs.new_tensor(np.asarray(lidar2image))
             camera_intrinsics = imgs.new_tensor(np.array(camera_intrinsics))
             camera2lidar = imgs.new_tensor(np.asarray(camera2lidar))
