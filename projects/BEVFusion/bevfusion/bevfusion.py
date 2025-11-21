@@ -18,7 +18,14 @@ from .ops import Voxelization
 
 @MODELS.register_module()
 class BEVFusion(Base3DDetector):
-
+    """
+     点云 → 体素化 → HardSimpleVFE → SparseEncoder(256C)
+     图像 → Swin → FPN → view_transform → BEV(80C)
+     融合 → ConvFuser(336→256)
+     BEV Backbone SECOND
+     BEV Neck SECONDFPN (输出 256C)
+     BEV Head BEVFusionHead
+    """
     def __init__(
         self,
         data_preprocessor: OptConfigType = None,
@@ -113,15 +120,17 @@ class BEVFusion(Base3DDetector):
 
         return loss, log_vars  # type: ignore
 
-    def init_weights(self) -> None:
-        if self.img_backbone is not None and self.img_backbone.init_cfg.checkpoint is not None:
-            self.img_backbone.init_weights()
     # def init_weights(self) -> None:
-    #     if self.img_backbone is not None:
-    #     # 安全判断 init_cfg
-    #        init_cfg = getattr(self.img_backbone, 'init_cfg', None)
-    #        if init_cfg is not None and getattr(init_cfg, 'checkpoint', None) is not None:
-    #            self.img_backbone.init_weights()
+    #     if self.img_backbone is not None and self.img_backbone.init_cfg.checkpoint is not None:
+    #         self.img_backbone.init_weights()
+
+    def init_weights(self) -> None:
+        if self.img_backbone is not None:
+        # 安全判断 init_cfg
+           init_cfg = getattr(self.img_backbone, 'init_cfg', None)
+           if init_cfg is not None and getattr(init_cfg, 'checkpoint', None) is not None:
+               self.img_backbone.init_weights()
+
 
     @property
     def with_bbox_head(self):
@@ -135,7 +144,7 @@ class BEVFusion(Base3DDetector):
 
     def extract_img_feat(
         self,
-        x,
+        x, # 图像 [B, N_cam, 3, H, W]
         points,
         lidar2image,
         camera_intrinsics,
@@ -148,18 +157,24 @@ class BEVFusion(Base3DDetector):
         lidar_aug_matrix_inverse=None,
         geom_feats=None,
     ) -> torch.Tensor:
-        B, N, C, H, W = x.size()
-        x = x.view(B * N, C, H, W).contiguous()
+        B, N, C, H, W = x.size() # (1, 5, 3, 384, 704)
+        x = x.view(B * N, C, H, W).contiguous() # 维度压缩：多相机合并 batch （5, 3, 384, 704)
 
-        x = self.img_backbone(x)
-        x = self.img_neck(x)
+        x = self.img_backbone(x)# 经 Swin Transformer 提取多尺度特征
+        # x[0].shape torch.Size([5, 192, 48, 88]) 1/8
+        # x[1].shape torch.Size([5, 384, 24, 44]) 1/16
+        # x[2].shape torch.Size([5, 768, 12, 22]) 1/32
+        x = self.img_neck(x) # 用 FPN 融合多尺度
+        # P3: [5, 256, 48, 88]   (融合 x[0] & x[1])
+        # P4: [5, 256, 24, 44]   (融合 x[1] & x[2])
+
 
         if not isinstance(x, torch.Tensor):
             x = x[0]
 
-        BN, C, H, W = x.size()
-        assert BN == B * N, (BN, B * N)
-        x = x.view(B, N, C, H, W)
+        BN, C, H, W = x.size() # [B, 256, 48, 88] 
+        assert BN == B * N, (BN, B * N) #
+        x = x.view(B, N, C, H, W) # 再拆回多相机维度 torch.Size([1, 5, 256, 48, 88])
 
         with torch.cuda.amp.autocast(enabled=False):
             # with torch.autocast(device_type='cuda', dtype=torch.float32):
@@ -285,7 +300,7 @@ class BEVFusion(Base3DDetector):
 
         if imgs is not None and "lidar2img" not in batch_inputs_dict:
             # NOTE(knzo25): normal training and testing
-            imgs = imgs.contiguous()
+            imgs = imgs.contiguous() # [B, N_cam, 3, H, W]
             lidar2image, camera_intrinsics, camera2lidar = [], [], []
             img_aug_matrix, lidar_aug_matrix = [], []
             # 读取每个 sample 的标定矩阵
@@ -301,6 +316,7 @@ class BEVFusion(Base3DDetector):
             camera2lidar = imgs.new_tensor(np.asarray(camera2lidar))
             img_aug_matrix = imgs.new_tensor(np.asarray(img_aug_matrix))
             lidar_aug_matrix = imgs.new_tensor(np.asarray(lidar_aug_matrix))
+            #  提取图像 BEV 特征
             img_feature, depth_loss = self.extract_img_feat(
                 imgs,
                 deepcopy(points),

@@ -29,11 +29,11 @@ model = dict(
         out_indices=[1, 2, 3],
         with_cp=False,
         convert_weights=True,
-        init_cfg=dict(
-            type='Pretrained',
-            checkpoint=  "/home/liujie/code/ADML3D-main/data/pre-model/swint-nuimages-pretrained.pth" # noqa: E501
-        )
-         # init_cfg= None
+        # init_cfg=dict(
+        #     type='Pretrained',
+        #     checkpoint=  "/home/liujie/code/ADML3D-main/data/pre-model/swint-nuimages-pretrained.pth" # noqa: E501
+        # )
+        init_cfg= None
         ),
     img_neck=dict(
         type='GeneralizedLSSFPN',
@@ -172,8 +172,8 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=2,
-    num_workers=8,
+    batch_size=1,
+    num_workers = 2,
     dataset=dict(
         dataset=dict(pipeline=train_pipeline, modality=input_modality)))
 val_dataloader = dict(
