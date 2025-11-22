@@ -54,7 +54,7 @@ class BaseViewTransform(nn.Module):
         ds = torch.arange(*self.dbound, dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW) #创建一个深度的张量 ds，它是从 self.dbound 范围内均匀生成的深度值，并将其扩展到特征图的宽高维度 fH x fW
         D, _, _ = ds.shape
 
-        xs = torch.linspace(0, iW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW) 
+        xs = torch.linspace(0, iW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)  #x 坐标：在 $[0, iW-1]$ 范围内均匀采样的 $fW$ 个像素列索引，并扩展到 $D$ 和 $fH$ 维度
         ys = torch.linspace(0, iH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)
 
         frustum = torch.stack((xs, ys, ds), -1)  #构成一个形状为 (D, fH, fW, 3) 的张量，表示每个深度值对应的 3D 坐标（x, y, z）
@@ -439,7 +439,7 @@ class BaseDepthTransform(BaseViewTransform):
                 post_trans,
                 extra_rots=extra_rots,
                 extra_trans=extra_trans,
-            )
+            ) #最终返回的 points (即 geom) 就是 $B \times N \times D \times H \times W \times 3$ 的张量，存储了所有视锥体网格点在 3D 空间中的坐标。
 
             # Load from the pkl
             """ import pickle
