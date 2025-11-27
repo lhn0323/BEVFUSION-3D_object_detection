@@ -197,11 +197,12 @@ class BEVFusion(Base3DDetector):
 
         if "voxels" not in batch_inputs_dict:
             # NOTE(knzo25): training and normal inference
-            points = batch_inputs_dict["points"]
+            points = batch_inputs_dict["points"] # [178918, 3])[[tensor([[-7.0303,  7.8997, -2.8850],[ 8.7951, -0.4787, -3.0808],...]
             with torch.cuda.amp.autocast(enabled=False):
                 # with torch.autocast('cuda', enabled=False):
                 points = [point.float() for point in points] #从输入字典中取出原始点云数据 (points)
-                feats, coords, sizes = self.voxelize(points) #点云处理的第一步,将3D空间划分为规则的体素（Voxel）网格,将落在同一体素内的所有点进行聚合（如求平均、求和、最大值等），得到该体素的特征。输出：feats: 体素特征（每个体素的聚合特征）。coords: 体素坐标（每个非空体素的离散 $(Z, Y, X, B)$ 索引）。sizes: 每个体素内包含的点数
+                feats, coords, sizes = self.voxelize(points) #点云处理的第一步,将3D空间划分为规则的体素（Voxel）网格,将落在同一体素内的所有点进行聚合（如求平均、求和、最大值等），得到该体素的特征。
+                # 输出：feats: 体素特征（每个体素的聚合特征）。coords: 体素坐标（每个非空体素的离散 $(Z, Y, X, B)$ 索引）。sizes: 每个体素内包含的点数
                 batch_size = coords[-1, 0] + 1
         else:
             # NOTE(knzo25): onnx inference. Voxelization happens outside the graph
@@ -327,7 +328,7 @@ class BEVFusion(Base3DDetector):
                 img_aug_matrix,
                 lidar_aug_matrix,
                 batch_input_metas,
-            )
+            ) # ([1, 80, 180, 180]) tensor(4.7462, device='cuda:0', grad_fn=<DivBackward0>)
             features.append(img_feature)
         elif imgs is not None:
             # NOTE(knzo25): onnx inference

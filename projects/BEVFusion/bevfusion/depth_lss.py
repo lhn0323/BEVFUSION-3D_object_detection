@@ -95,7 +95,8 @@ class BaseViewTransform(nn.Module):
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         # 最后加上 camera2lidar_trans（平移）
         points += camera2lidar_trans.view(B, N, 1, 1, 1, 3)
-        # 如果有 extra_rots和extra_trans（来自 lidar augmentation）则再做一次旋转和平移 逆数据增强
+        # 如果有 extra_rots和extra_trans（来自 lidar augmentation）则再做一次旋转和平移 数据增强
+        # 对几何模版 points 应用的是和点云相同的增强，而不是逆增强 保持 frustum 点与增强后的点云对齐
         if "extra_rots" in kwargs:
             extra_rots = kwargs["extra_rots"]
             points = (
@@ -184,33 +185,22 @@ class BaseViewTransform(nn.Module):
 
         # Taken out of bev_pool for pre-computation geom_feats是 frustum 中每个体素（像素 × 深度 bin）的 3D 坐标（在 Lidar 坐标系）([1, 5, 118, 48, 88, 3])
         geom_feats, kept, ranks, indices = self.bev_pool_aux(geom_feats)
-        # geom_feats([1, 5, 118, 48, 88, 3]) kept:([2492160])
-        # ranks: 每个点的 voxel 排序标号 indices: 排序后点的索引，用于同步 x
-        # 显存够用的时候调试训练都放出来
-        # x = x[kept]# 根据geom_feats的布尔掩码过滤特征同步
-        # assert x.shape[0] == geom_feats.shape[0] 
-        # x = x[indices]# 排序 
-
-        # 将 mask 下移到 CPU，减少 GPU 内存占用
-        kept_cpu = kept.cpu()
-        # 先把 x 移到 CPU 执行筛选
-        x = x.cpu()[kept_cpu]
-        indices_cpu = indices.cpu()
-        x = x.cpu()[indices_cpu]
-        # 然后再把筛选后的 x 移回 GPU
-        # x = x.cuda(non_blocking=True)
+        # geom_feats([1695595, 4]) kept:([2492160])
+        # ranks: 每个点的 voxel 排序标号 indices: ([1695595])排序后点的索引，用于同步 x
+        x = x[kept]# 根据geom_feats的布尔掩码过滤特征同步 x:([2492160, 80])-->([1695595, 80])
+        assert x.shape[0] == geom_feats.shape[0] 
+        x = x[indices]# 排序 ([1695595, 80])
 
         """ import pickle
         with open("precomputed_features.pkl", "rb") as f:
             data = pickle.load(f) """
         # CUDA voxel pooling
-        #  1, 1,360,360,true
+        # 图像特征点乘深度分数的体素特征([1695595, 80]),排序和过滤后的真实模版三维坐标点的体素索引和batch——id([1695595, 4]), 每个点体素序号([1695595),1, 1,360,360,true
         x = bev_pool(x, geom_feats, ranks, B, self.nx[2], self.nx[0], self.nx[1], self.training)
-
-        # collapse Z  将聚合后的 3D BEV 特征从 $B \times C \times D \times H_{\text{bev}} \times W_{\text{bev}}$ 转换为最终的 2D BEV 特征。
-        #将深度维度 $D$ (Z 轴) 展平并连接到特征维度 $C$ 上，得到最终的 2D 鸟瞰图 (BEV) 特征，形状为 $B \times (C \cdot D) \times H_{\text{bev}} \times W_{\text{bev}}$。
-        final = torch.cat(x.unbind(dim=2), 1)
-
+        # x.shape: [B, C, D, H, W] = [1, 80, 1, 360, 360] cat沿着通道维度 C 拼接 原本 [B, C, D, H, W] → [B, C*D, H, W] ([1, 80, 360, 360]) 
+        # 把原来的深度维度展开到特征维度上
+        final = torch.cat(x.unbind(dim=2), 1) # x.unbind(dim=2)[0].shape:([1, 80, 360, 360])沿深度维度 D 拆开 得到的是一个长度为 D 的 tuple
+        # BEV backbone（卷积网络）通常处理 二维特征图 [B, C, H, W] 所以需要 collapse Z，把深度维度整合到通道上，对应每个 voxel 的 3D 特征 → 2D BEV 特征
         return final
 
     def bev_pool_precomputed(self, x, geom_feats, kept, ranks, indices):
@@ -503,13 +493,13 @@ class BaseDepthTransform(BaseViewTransform):
             """ import pickle
             with open("precomputed_features.pkl", "rb") as f:
                 data = pickle.load(f) """
-            # 从图像特征与稀疏 depth 生成 per-camera 的 lifted features 为每个像素找到所属的特征图 cell
+            # 从图像特征与稀疏 depth 生成的图像特征点乘深度分数的体素特征（用于 BEV Pooling 的特征） 模型预测的深度概率分布 基于 LiDAR 投影得到的真值深度概率分布（监督信号） 每个 frustum 单元中落入的 LiDAR 点个数
             x, est_depth_distr, gt_depth_distr, counts_3d = self.get_cam_feats(img, depth)
-
+            # ([1, 5, 118, 48, 88, 80]) ([1, 5, 48, 88, 118]) ([1, 5, 48, 88, 118]) ([1, 5, 48, 88, 118]) 
             """ import pickle
             with open("depth_deploy.pkl", "rb") as f:
                 data = pickle.load(f) """
-            # 根据动态计算得到的 geom 做 BEV pooling（把 3D volume 特征汇聚到 BEV 网格）
+            # 根据动态计算得到的 geom 做 BEV pooling（把 3D volume 特征汇聚到 BEV 网格）得到了2D BEV 特征 ([1, 80, 360, 360])
             x = self.bev_pool(x, geom)
 
         if self.training:
@@ -542,21 +532,23 @@ class BaseDepthTransform(BaseViewTransform):
 
             with open("bev_features.pkl", "wb") as f:
                 pickle.dump(data, f)"""
-            #这段是 估计深度分布 (est_depth_distr) 和 LiDAR 衍生的真值深度分布 (gt_depth_distr) 之间的交叉熵损失 (Cross-Entropy Loss)，核心思想是：只在有 LiDAR 点云数据（即有可靠深度真值）的地方计算损失，以指导模型学习正确的深度分布
+            #这段是 估计深度分布 (est_depth_distr) 和 LiDAR 衍生的真值深度分布 (gt_depth_distr) 之间的交叉熵损失 (Cross-Entropy Loss)，核心思想是：只在有 LiDAR 点云数据（即有可靠深度真值）的地方计算损失，以指导模型学习正确的深度分布 
 
-            #计算有效掩码：counts_3d 表示每个视锥体单元格内 LiDAR 点的数量。对最后一个维度求和（$\text{sum}(\text{dim}=-1)$）后，如果点数大于 0，则标记为 True。mask_flat 是一个布尔向量，标记了所有包含至少一个 LiDAR 点的 3D 单元格
+            # 计算有效掩码：counts_3d 表示每个视锥体单元格内 LiDAR 点的数量([1, 5, 48, 88, 118])。
+            # 把 depth 维 D 上的点数求和，得到每个像素列（每个 H×W 单元）在全部深度 bin 上的 LiDAR 点总数，输出形状 [B, N, H, W] = [1, 5, 48, 88]
+            # 对最后一个维度求和后，如果点数大于 0，则标记为 True。mask_flat 是一个布尔向量，标记了所有包含至少一个 LiDAR 点的 3D 单元格
             mask_flat = counts_3d.sum(dim=-1).view(-1) > 0
-            #展平真值分布：将 LiDAR 衍生的真值深度分布张量展平，形状变为 $(N_{\text{total}}, D)$，其中 $N_{\text{total}}$ 是所有视锥体单元格的总数，$D$ 是离散深度 bin 的数量
-            gt_depth_distr_flat = gt_depth_distr.view(-1, self.D)
+            #展平真值分布：将 LiDAR 衍生的真值深度分布张量展平，形状变为([21120, 118]) 其中21120是所有视锥体单元格的总数，118是离散深度 bin 的数量
+            gt_depth_distr_flat = gt_depth_distr.view(-1, self.D) # 把所有像素列（样本内、所有相机）展平到第一维，便于按行计算每个像素列的深度分布损失
             est_depth_distr_flat = est_depth_distr.reshape(-1, self.D)  #将模型预测的深度分布展平，形状与真值分布一致。
             #计算交叉熵损失：对于每个视锥体单元格，计算真值分布和预测分布之间的交叉熵。然后使用 mask_flat 仅保留那些有 LiDAR 点的单元格的损失值，最后对这些损失求和并归一化，得到最终的深度损失
-            cross_ent = -torch.sum(gt_depth_distr_flat * torch.log(est_depth_distr_flat + 1e-8), dim=-1)
-            cross_ent_masked = cross_ent * mask_flat.float()
-            depth_loss = torch.sum(cross_ent_masked) / (mask_flat.sum() + 1e-8)
+            cross_ent = -torch.sum(gt_depth_distr_flat * torch.log(est_depth_distr_flat + 1e-8), dim=-1)# 该项对 est_depth_distr_flat 可导，梯度会传回到模型输出的深度预测网络部分，从而训练深度分布预测。
+            cross_ent_masked = cross_ent * mask_flat.float()# mask_flat 是布尔向量，转换为 float() 后（0或1）能直接乘以 cross_ent，把无真值的像素列损失置 0。
+            depth_loss = torch.sum(cross_ent_masked) / (mask_flat.sum() + 1e-8) # 平均交叉熵损失
         else:
             depth_loss = 0.0
-
-        return x, depth_loss
+        
+        return x, depth_loss# 2D BEV 特征([1, 80, 360, 360]) 可以直接加入总 loss 并反向传播的depth_losstensor(4.7462, device='cuda:0', grad_fn=<DivBackward0>)
 
 
 @MODELS.register_module()
@@ -737,5 +729,5 @@ class DepthLSSTransform(BaseDepthTransform):
     def forward(self, *args, **kwargs):
         # 调用父类的 forward（BaseDepthTransform.forward），得到 x_bev 和 depth_loss
         x, depth_loss = super().forward(*args, **kwargs)
-        x = self.downsample(x)
-        return x, depth_loss
+        x = self.downsample(x)# 把 BEV Pooling 得到的 BEV 特征的分辨率从 360×360 下采样成 180×180，同时保持通道数 80 不变。([1, 80, 360, 360])-->([1, 80, 180, 180])
+        return x, depth_loss 
