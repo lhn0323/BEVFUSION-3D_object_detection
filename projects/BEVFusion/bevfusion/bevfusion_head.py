@@ -35,8 +35,7 @@ class ConvFuser(nn.Sequential):
         )
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
-        return super().forward(torch.cat(inputs, dim=1))
-
+        return super().forward(torch.cat(inputs, dim=1))     #在第二个通道维度上拼接不同传感器的特征图，完成特征的融合
 
 @MODELS.register_module()
 class BEVFusionHead(nn.Module):

@@ -10,13 +10,13 @@ log_file = "work_dirs/bevfusion_lidar_camera/20251119_175053/20251119_175053.log
 class_names = ['car', 'truck','bus', 'bicycle', 'pedestrian']
 
 # 保存每个类别的 mAP
-categories_map = defaultdict(list)
+categories_map = defaultdict(list) 
 epochs_list = []
 
 with open(log_file, "r") as f:
     lines = f.readlines()
 
-epoch_num = None
+epoch_num = None 
 
 for i, line in enumerate(lines):
     # 匹配 Epoch 信息

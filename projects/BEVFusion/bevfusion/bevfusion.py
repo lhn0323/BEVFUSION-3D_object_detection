@@ -18,6 +18,14 @@ from .ops import Voxelization
 
 @MODELS.register_module()
 class BEVFusion(Base3DDetector):
+    """
+     点云 → 体素化 → HardSimpleVFE → SparseEncoder(256C)
+     图像 → Swin → FPN → view_transform → BEV(80C)
+     融合 → ConvFuser(336→256)
+     BEV Backbone SECOND
+     BEV Neck SECONDFPN (输出 256C)
+     BEV Head BEVFusionHead
+    """
 
     def __init__(
         self,
@@ -113,15 +121,15 @@ class BEVFusion(Base3DDetector):
 
         return loss, log_vars  # type: ignore
 
-    def init_weights(self) -> None:
-        if self.img_backbone is not None and self.img_backbone.init_cfg.checkpoint is not None:
-            self.img_backbone.init_weights()
     # def init_weights(self) -> None:
-    #     if self.img_backbone is not None:
-    #     # 安全判断 init_cfg
-    #        init_cfg = getattr(self.img_backbone, 'init_cfg', None)
-    #        if init_cfg is not None and getattr(init_cfg, 'checkpoint', None) is not None:
-    #            self.img_backbone.init_weights()
+    #     if self.img_backbone is not None and self.img_backbone.init_cfg.checkpoint is not None:
+    #         self.img_backbone.init_weights()
+    def init_weights(self) -> None:
+        if self.img_backbone is not None:
+        # 安全判断 init_cfg
+           init_cfg = getattr(self.img_backbone, 'init_cfg', None)
+           if init_cfg is not None and getattr(init_cfg, 'checkpoint', None) is not None:
+               self.img_backbone.init_weights()
 
     @property
     def with_bbox_head(self):
@@ -149,17 +157,17 @@ class BEVFusion(Base3DDetector):
         geom_feats=None,
     ) -> torch.Tensor:
         B, N, C, H, W = x.size()
-        x = x.view(B * N, C, H, W).contiguous()
+        x = x.view(B * N, C, H, W).contiguous() #torch.Size([5, 3, 384, 704])
 
         x = self.img_backbone(x)
         x = self.img_neck(x)
 
         if not isinstance(x, torch.Tensor):
-            x = x[0]
+            x = x[0]  #torch.Size([5, 256, 48, 88])
 
         BN, C, H, W = x.size()
         assert BN == B * N, (BN, B * N)
-        x = x.view(B, N, C, H, W)
+        x = x.view(B, N, C, H, W) #torch.Size([1, 5, 256, 48, 88])
 
         with torch.cuda.amp.autocast(enabled=False):
             # with torch.autocast(device_type='cuda', dtype=torch.float32):
@@ -180,14 +188,15 @@ class BEVFusion(Base3DDetector):
         return x, depth_loss
 
     def extract_pts_feat(self, batch_inputs_dict) -> torch.Tensor:
+        #LiDAR 数据的体素化 (Voxelization) 和 3D 特征编码
 
         if "voxels" not in batch_inputs_dict:
             # NOTE(knzo25): training and normal inference
             points = batch_inputs_dict["points"]
             with torch.cuda.amp.autocast(enabled=False):
                 # with torch.autocast('cuda', enabled=False):
-                points = [point.float() for point in points]
-                feats, coords, sizes = self.voxelize(points)
+                points = [point.float() for point in points] #从输入字典中取出原始点云数据 (points)
+                feats, coords, sizes = self.voxelize(points) #点云处理的第一步,将3D空间划分为规则的体素（Voxel）网格,将落在同一体素内的所有点进行聚合（如求平均、求和、最大值等），得到该体素的特征。输出：feats: 体素特征（每个体素的聚合特征）。coords: 体素坐标（每个非空体素的离散 $(Z, Y, X, B)$ 索引）。sizes: 每个体素内包含的点数
                 batch_size = coords[-1, 0] + 1
         else:
             # NOTE(knzo25): onnx inference. Voxelization happens outside the graph
@@ -204,31 +213,33 @@ class BEVFusion(Base3DDetector):
                 assert self.voxelize_reduce
                 if self.voxelize_reduce:
                     feats = feats.sum(dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)
-
-        x = self.pts_middle_encoder(feats, coords, batch_size)
+#得到体素特征 (feats) 和对应的稀疏坐标 (coords)，然后进入特征编码阶段.中间编码器 (self.pts_middle_encoder)： 这通常是一个 稀疏卷积网络（如 PointPillar 或 VoxelNet 中的 3D 稀疏卷积）或者一个 2D 伪-体素网络。
+#输入： 稀疏的体素特征和坐标。功能： 对稀疏体素空间进行特征提取和下采样。输出： 编码后的张量 x。对于 BEVFusion 来说，这个 x 最终通常是 3D 稀疏张量 或一个已经被展平/投影到 BEV 平面的特征图。
+        x = self.pts_middle_encoder(feats, coords, batch_size) #N, (C * D), H, W
         return x
 
     @torch.no_grad()
-    def voxelize(self, points):
+    def voxelize(self, points):#将批次中的每个点云样本独立地进行体素化，然后将结果合并成稀疏格式的张量，准备输入给后续的 3D 编码器(就是后面哪个middle encoder)
         feats, coords, sizes = [], [], []
-        for k, res in enumerate(points):
-            ret = self.pts_voxel_layer(res)
-            if len(ret) == 3:
+        for k, res in enumerate(points): #遍历批次中的每个点云样本
+            ret = self.pts_voxel_layer(res)  #调用实际的体素化模块,对单个点云样本进行体素化，得到体素特征、坐标和大小（例如 Hard Voxelization 或 Dynamic Voxelization）
+            if len(ret) == 3: #Hard Voxelization：通常返回三个值：特征 ($f$)、体素坐标 ($c$)、每个体素内的点数 ($n$)。
                 # hard voxelize
                 f, c, n = ret
-            else:
+            else:                     #Dynamic Voxelization 或简化模式：返回特征和坐标
                 assert len(ret) == 2
                 f, c = ret
                 n = None
             feats.append(f)
-            coords.append(F.pad(c, (1, 0), mode="constant", value=k))
+            coords.append(F.pad(c, (1, 0), mode="constant", value=k))  #添加 Batch 索引：c 包含体素的 $(Z, Y, X)$ 坐标。使用 F.pad 在坐标张量左侧填充一个值为 $k$（当前的批次索引 $k$）的新维度。这样，体素坐标 $c$ 就变成了稀疏张量所需的 $\boldsymbol{(B, Z, Y, X)}$ 格式，确保在合并后能区分不同样本的体素
             if n is not None:
                 sizes.append(n)
-
-        feats = torch.cat(feats, dim=0)
-        coords = torch.cat(coords, dim=0)
+        #循环结束后，函数将所有样本的结果合并成稀疏表示所需的最终张量
+        feats = torch.cat(feats, dim=0) #将所有样本的体素特征沿维度 0（体素索引）拼接起来
+        coords = torch.cat(coords, dim=0) #将所有样本的 $\boldsymbol{(B, Z, Y, X)}$ 坐标拼接起来
         if len(sizes) > 0:
-            sizes = torch.cat(sizes, dim=0)
+            sizes = torch.cat(sizes, dim=0) #如果存在，拼接所有样本的每个体素内的点数
+#对Hard Voxelization的输出，执行特征降维和归一化：在 Hard Voxelization 的常见实现中，feats 维度是 $\text{(体素总数, 单体素最大点数, 特征维度)}$。如果启用了 self.voxelize_reduce（通常用于 PointPillars 或简化 VoxelNet），它会对单个体素内所有点的特征进行求和（feats.sum(dim=1)）。然后，将求和结果除以该体素内的实际点数 (sizes)，相当于计算了该体素内所有点特征的平均值，作为该体素的最终特征。.contiguous() 确保内存连续性，为后续的稀疏卷积做准备
             if self.voxelize_reduce:
                 feats = feats.sum(dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)
                 feats = feats.contiguous()
@@ -354,8 +365,8 @@ class BEVFusion(Base3DDetector):
             assert len(features) == 1, features
             x = features[0]
 
-        x = self.pts_backbone(x)
-        x = self.pts_neck(x)
+        x = self.pts_backbone(x) #SECOND 由一系列降采样（Downsampling）和特征提取块 (blocks) 组成，这些块将 BEV 特征图逐渐缩小，并增加特征通道数
+        x = self.pts_neck(x) #SECONDFPN 接收来自主干网络 (SECOND) 的多尺度 BEV 特征，通过上采样 (Upsampling) 将它们恢复到统一的高分辨率，并将它们拼接起来，生成最终的、信息丰富的 BEV 特征图
 
         return x, depth_loss
 

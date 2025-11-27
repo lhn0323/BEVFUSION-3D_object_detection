@@ -38,14 +38,16 @@ class QuickCumsumTrainingCuda(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, geom_feats, ranks, B, D, H, W):
-        kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)
-        kept[1:] = ranks[1:] != ranks[:-1]
-        interval_starts = torch.where(kept)[0].int()
-        interval_lengths = torch.zeros_like(interval_starts)
-        interval_lengths[:-1] = interval_starts[1:] - interval_starts[:-1]
-        interval_lengths[-1] = x.shape[0] - interval_starts[-1]
+        #由于特征 (x) 已经根据 ranks 排序，所有属于同一个 BEV 单元的特征是连续排列的。
+        kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool) #确因此，kept 标记了每个新的 BEV 单元特征块的起始位置。
+        kept[1:] = ranks[1:] != ranks[:-1]   #会在每次 BEV 单元索引 (ranks) 发生变化时返回 True
+        interval_starts = torch.where(kept)[0].int()  #就是这些起始位置的索引
+        interval_lengths = torch.zeros_like(interval_starts) 
+        interval_lengths[:-1] = interval_starts[1:] - interval_starts[:-1]  #每个 BEV 单元的特征长度等于下一个单元起始点减去当前单元起始点
+        interval_lengths[-1] = x.shape[0] - interval_starts[-1]  #最后一个单元的长度是总特征数减去其起始点
         geom_feats = geom_feats.int()
-
+        #这是实际的聚合发生的地方 bev_pool_forward是一个在 GPU 上高度优化的 C++/CUDA 函数
+        #它利用 interval_starts 和 interval_lengths 的信息，并行地对每个 BEV 单元的特征向量进行求和 (或平均)
         out = bev_pool_ext.bev_pool_forward(
             x,
             geom_feats,
@@ -56,14 +58,14 @@ class QuickCumsumTrainingCuda(torch.autograd.Function):
             H,
             W,
         )
-
+        #为了进行反向传播，必须保存 BEV 单元的边界信息（起始和长度），因为它们决定了聚合的映射关系
         ctx.save_for_backward(interval_starts, interval_lengths, geom_feats)
         ctx.saved_shapes = B, D, H, W
         return out
 
     @staticmethod
     def backward(ctx, out_grad):
-        interval_starts, interval_lengths, geom_feats = ctx.saved_tensors
+        interval_starts, interval_lengths, geom_feats = ctx.saved_tensors #从前向传播中恢复 BEV 单元的边界信息
         B, D, H, W = ctx.saved_shapes
 
         out_grad = out_grad.contiguous()
@@ -76,7 +78,7 @@ class QuickCumsumTrainingCuda(torch.autograd.Function):
             D,
             H,
             W,
-        )
+        )    #输入: 聚合后 BEV 特征的梯度 (out_grad)，bev_pool_backward 函数执行梯度的分散 (De-Splatting)。它将聚合后的 BEV 单元的梯度 (out_grad) 复制并分配回所有参与该单元聚合的原始视锥体特征 (x) 对应的位置。例如，如果 5 个视锥体特征向量聚合到了 BEV 单元 $A$，那么 BEV 单元 $A$ 上的梯度会复制 5 份，分别作为这 5 个原始特征向量的梯度。
 
         return x_grad, None, None, None, None, None, None
 
@@ -138,6 +140,7 @@ def bev_pool(feats, coords, ranks, B, D, H, W, is_training):
     assert feats.shape[0] == coords.shape[0]
 
     # NOTE(knzo25): we want to put all the operations we can in the graph
+    #将视锥体特征 (feats) 根据其在 3D 空间中的位置 (coords，已排序的 ranks)，聚合到 BEV 网格中
     if is_training:
         x = QuickCumsumTrainingCuda.apply(feats, coords, ranks, B, D, H, W)
 
@@ -157,6 +160,6 @@ def bev_pool(feats, coords, ranks, B, D, H, W, is_training):
             feats, coords, interval_lengths, interval_starts, int(B), D.item(), H.item(), W.item()
         )
 
-    x = x.permute(0, 4, 1, 2, 3).contiguous()
+    x = x.permute(0, 4, 1, 2, 3).contiguous()    #B D C H W 
 
     return x

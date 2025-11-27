@@ -32,12 +32,12 @@ def parse_args():
         description="Visualize BEVFusion predictions by projecting 3D bboxes onto multi-view camera images and saving a video."
     )
     parser.add_argument("config", help="Path to BEVFusion config file")
-    parser.add_argument("checkpoint", help="Path to checkpoint file")
+    parser.add_argument("--checkpoint", type=str, default="work_dirs/bevfusion_lidar_camera/20251115_085333/epoch_6.pth")
     parser.add_argument("--threshold", type=float, default=0.01, help="Score threshold for predictions")
     parser.add_argument("--step", type=int, default=40, help="Number of steps to visualize (-1 for full)")
     parser.add_argument("--cam_order", type=int, nargs="*", default=None, help="Custom camera order, e.g., 0 1 2 3")
     parser.add_argument("--fps", type=float, default=2.0, help="FPS of output video")
-    parser.add_argument("--out", type=str, default=None, help="Output video path (default: work_dir/visualization/visualization_bevfusion.mp4)")
+    parser.add_argument("--out", type=str, default="work_dirs/visualization/camera/visualization_camera.mp4", help="Output video path (default: work_dir/visualization/visualization_bevfusion.mp4)")
     parser.add_argument("--show-pred", action="store_true", help="Show predictions instead of ground truth")
     return parser.parse_args()
 

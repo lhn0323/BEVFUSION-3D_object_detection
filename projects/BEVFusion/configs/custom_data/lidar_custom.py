@@ -278,7 +278,8 @@ visualizer = dict(
 
 # learning rate
 #lr = 0.0001
-lr = lr = 1.67e-5
+#lr = 1.67e-5
+lr = 0.00005
 param_scheduler = [
     # learning rate scheduler
     # During the first 8 epochs, learning rate increases from 0 to lr * 10

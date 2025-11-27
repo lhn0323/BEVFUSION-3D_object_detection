@@ -210,14 +210,21 @@ class NuScenesCustomMetric(BaseMetric):
         backend_args (dict, optional): Arguments to instantiate the
             corresponding backend. Defaults to None.
     """
+    # CLASSES = (
+    #     'car',
+    #     'truck',
+    #     'bus',
+    #     'bicycle',
+    #     'pedestrian',
+    #     'traffic_cone',
+    #     'barrier',
+    # )
     CLASSES = (
         'car',
         'truck',
         'bus',
         'bicycle',
         'pedestrian',
-        'traffic_cone',
-        'barrier',
     )
     # CLASSES = (
     #     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 

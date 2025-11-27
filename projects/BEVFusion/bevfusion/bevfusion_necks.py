@@ -74,7 +74,7 @@ class GeneralizedLSSFPN(BaseModule):
     def forward(self, inputs):
         """Forward function."""
         # upsample -> cat -> conv1x1 -> conv3x3
-        assert len(inputs) == len(self.in_channels)
+        assert len(inputs) == len(self.in_channels)  #3
 
         # build laterals
         laterals = [inputs[i + self.start_level] for i in range(len(inputs))]
@@ -92,5 +92,5 @@ class GeneralizedLSSFPN(BaseModule):
             laterals[i] = self.fpn_convs[i](laterals[i])
 
         # build outputs
-        outs = [laterals[i] for i in range(used_backbone_levels)]
+        outs = [laterals[i] for i in range(used_backbone_levels)] #2
         return tuple(outs)
