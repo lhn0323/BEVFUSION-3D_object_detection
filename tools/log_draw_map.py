@@ -5,7 +5,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 # 日志文件路径
-log_file = "work_dirs/training_results/lidar_cam/20251119_175053/20251119_175053.log"
+log_file = "work_dirs/bevfusion_lidar_camera/20251122_124649/20251122_124649.log"
 
 class_names = ['car', 'truck','bus', 'bicycle', 'pedestrian']
 

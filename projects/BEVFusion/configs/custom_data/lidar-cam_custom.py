@@ -262,7 +262,7 @@ optim_wrapper = dict(
 auto_scale_lr = dict(enable=False, base_batch_size=32)
 
 default_hooks = dict(
-    logger=dict(type='LoggerHook', interval=5),
+    logger=dict(type='LoggerHook', interval=10),
     checkpoint=dict(type='CheckpointHook', interval=1))
 del _base_.custom_hooks
 work_dir = 'work_dirs/bevfusion_lidar_camera'

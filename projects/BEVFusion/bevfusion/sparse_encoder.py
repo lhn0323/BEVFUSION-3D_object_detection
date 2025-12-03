@@ -129,26 +129,27 @@ class BEVFusionSparseEncoder(SparseEncoder):
                 module returns middle features.
         """
         coors = coors.int() 
-        #voxel_features: 非空体素的特征向量。coors: 非空体素的 $(B, Z, Y, X)$ 坐标。self.sparse_shape: 整个体素网格的逻辑尺寸（例如 $(D, H, W)$）。batch_size: 批次大小
-        input_sp_tensor = SparseConvTensor(voxel_features, coors, self.sparse_shape, batch_size) #创建稀疏卷积张量：将输入的体素特征和坐标封装成一个 SparseConvTensor 对象，以便后续的稀疏卷积操作使用。SparseConvTensor是spconv 库的核心数据结构，
-        x = self.conv_input(input_sp_tensor) #初始的稀疏 3D 卷积层，将输入特征通道 (in_channels) 映射到基准通道数 (base_channels)
+        #voxel_features: 非空体素的特征向量 ([54778, 3])。coors: 非空体素的(B, ZX, Y, Z)坐标。self.sparse_shape: 整个体素网格的逻辑尺寸 [1440, 1440, 41]。batch_size: 批次大小
+        input_sp_tensor = SparseConvTensor(voxel_features, coors, self.sparse_shape, batch_size) 
+        #创建稀疏卷积张量：将输入的体素特征和坐标封装成一个 SparseConvTensor 对象，以便后续的稀疏卷积操作使用。SparseConvTensor[shape=torch.Size([54778, 3])]包含input_sp_tensor.indices[54778, 4]) spatial_shape等
+        x = self.conv_input(input_sp_tensor) #初始的稀疏 3D 卷积层，将输入 voxel 特征维度从 3 → 16 x.features.shape:([54778, 16])
 
-#由多个稀疏 3D 卷积块组成（配置在 encoder_channels 和 encoder_paddings 中）。
-#功能: 这些层执行特征提取和下采样。在 3D 空间中进行卷积，使得特征能够捕捉到点云的邻域信息和层次结构。稀疏卷积的优势在于，它只在包含特征数据的非空体素上进行计算，从而大大减少了计算量。
+        #多层稀疏卷积编码器（配置在 encoder_channels 和 encoder_paddings 中）。
+        #功能: 这些层执行特征提取和下采样。在3D空间中进行卷积，使得特征能够捕捉到点云的邻域信息和层次结构。稀疏卷积的优势在于，它只在包含特征数据的非空体素上进行计算，从而大大减少了计算量。
         encode_features = []
         for encoder_layer in self.encoder_layers:
             x = encoder_layer(x)
-            encode_features.append(x)
-
+            encode_features.append(x) # 4层 [69635,32] [39161,64] [16677,128] [16677,128]
+    
         # for detection head
         # [200, 176, 5] -> [200, 176, 2]
-        out = self.conv_out(encode_features[-1]) #稀疏 3D 卷积层，用于将 3D 特征体在 Z 轴（高度/深度）上进行聚合或下采样。例如，如果 conv_out 的 kernel_size 是 (1, 1, 3) 且 stride 是 (1, 1, 2)，它只在 XY 平面（BEV 平面）上进行 $1 \times 1$ 卷积，但在 Z 轴上进行 $3 \times 1$ 卷积并进行 2 倍下采样
-        spatial_features = out.dense() #将稀疏张量转换回密集张量。此时 spatial_features 的维度是 $(N, C, H, W, D)$（这里 $N$ 是 Batch Size，$D, H, W$ 是稀疏形状中的深度、高度和宽度）
-
-        N, C, H, W, D = spatial_features.shape
-        spatial_features = spatial_features.permute(0, 1, 4, 2, 3).contiguous() #将维度从 $\boldsymbol{(N, C, H, W, D)}$ 调整为 $\boldsymbol{(N, C, D, H, W)}$（假设原始 spconv 遵循 $(H, W, D)$ 顺序，而这里需要转换到标准 $(D, H, W)$ 顺序，但 BEVFusion 明确指出它使用 $(H, W, D)$ 顺序，所以这里的维度调整是为了后续的 $\text{view}$ 操作）
-        spatial_features = spatial_features.view(N, C * D, H, W) #将 $C$ 和 $D$ 维度合并，生成最终的 2D BEV 特征图。高度 $D$ 上的所有信息都被压缩到通道维度，使得网络可以像处理图像一样处理 BEV 特征
-
+        out = self.conv_out(encode_features[-1]) #稀疏 3D 卷积层，用于将 3D 特征体在 Z 轴上进行聚合或下采样。例如，如果 conv_out 的 kernel_size 是 (1, 1, 3) 且 stride 是 (1, 1, 2)，它只在 XY 平面（BEV 平面）上进行卷积，但在 Z 轴上进行卷积并进行 2 倍下采样
+        spatial_features = out.dense() #将稀疏张量转换回密集张量。此时 spatial_features 的维度是 (N, C, H, W, D)[1, 128, 180, 180, 2])（这里N是 Batch Size，D, H, W是稀疏形状中的深度、高度和宽度）
+        # out.indices([10601, 4]) out.features([10601, 128]) spatial_shape =[180, 180, 2]
+        N, C, H, W, D = spatial_features.shape # [1, 128, 180, 180, 2])
+        spatial_features = spatial_features.permute(0, 1, 4, 2, 3).contiguous() #将维度从 {(N, C, H, W, D)}--> (N, C, D, H, W)([1, 128, 2, 180, 180])
+        spatial_features = spatial_features.view(N, C * D, H, W) #将 C 和 D 维度合并，生成最终的 2D BEV 特征图。高度 D上的所有信息都被压缩到通道维度，使得网络可以像处理图像一样处理 BEV 特征
+        # spatial_features.shape:([1, 256, 180, 180])
         if self.return_middle_feats:
             return spatial_features, encode_features
         else:

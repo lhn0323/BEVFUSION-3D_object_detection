@@ -487,7 +487,7 @@ class BaseDepthTransform(BaseViewTransform):
                 post_trans,
                 extra_rots=extra_rots,
                 extra_trans=extra_trans,
-            ) #最终返回的 points (即 geom) 就是 $B N  D  H  W  3$ 的张量，存储了所有视锥体网格点在 3D 空间中的坐标，即所有视锥体网格点被精确定位到 3D LiDAR/BEV 空间中。最后一个维度3就是存储的XYZ 3D坐标点
+            ) #最终返回的 points (即 geom) 就是B N  D  H  W  3的张量，存储了所有视锥体网格点在 3D 空间中的坐标，即所有视锥体网格点被精确定位到 3D LiDAR/BEV 空间中。最后一个维度3就是存储的XYZ 3D坐标点
 
             # Load from the pkl
             """ import pickle

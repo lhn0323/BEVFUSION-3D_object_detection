@@ -195,16 +195,16 @@ class BEVFusion(Base3DDetector):
     def extract_pts_feat(self, batch_inputs_dict) -> torch.Tensor:
         #LiDAR 数据的体素化 (Voxelization) 和 3D 特征编码
 
-        if "voxels" not in batch_inputs_dict:
+        if "voxels" not in batch_inputs_dict:# 当 voxels 不在输入字典时（正常训练/推理）做体素化
             # NOTE(knzo25): training and normal inference
             points = batch_inputs_dict["points"] # [178918, 3])[[tensor([[-7.0303,  7.8997, -2.8850],[ 8.7951, -0.4787, -3.0808],...]
             with torch.cuda.amp.autocast(enabled=False):
                 # with torch.autocast('cuda', enabled=False):
                 points = [point.float() for point in points] #从输入字典中取出原始点云数据 (points)
                 feats, coords, sizes = self.voxelize(points) #点云处理的第一步,将3D空间划分为规则的体素（Voxel）网格,将落在同一体素内的所有点进行聚合（如求平均、求和、最大值等），得到该体素的特征。
-                # 输出：feats: 体素特征（每个体素的聚合特征）。coords: 体素坐标（每个非空体素的离散 $(Z, Y, X, B)$ 索引）。sizes: 每个体素内包含的点数
+                # 输出：feats: 体素特征（每个体素的聚合特征）([47122, 3])。coords: 体素坐标（每个非空体素的离散 (Z, Y, X, B)索引）([47122, 4])。sizes: 每个体素内包含的点数([47122])
                 batch_size = coords[-1, 0] + 1
-        else:
+        else:# 若 voxels 已给出（ONNX/部署场景），跳过体素化直接使用外部预处理的体素数据。
             # NOTE(knzo25): onnx inference. Voxelization happens outside the graph
             with torch.cuda.amp.autocast(enabled=False):
                 # with torch.autocast('cuda', enabled=False):
@@ -219,38 +219,40 @@ class BEVFusion(Base3DDetector):
                 assert self.voxelize_reduce
                 if self.voxelize_reduce:
                     feats = feats.sum(dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)
-#得到体素特征 (feats) 和对应的稀疏坐标 (coords)，然后进入特征编码阶段.中间编码器 (self.pts_middle_encoder)： 这通常是一个 稀疏卷积网络（如 PointPillar 或 VoxelNet 中的 3D 稀疏卷积）或者一个 2D 伪-体素网络。
-#输入： 稀疏的体素特征和坐标。功能： 对稀疏体素空间进行特征提取和下采样。输出： 编码后的张量 x。对于 BEVFusion 来说，这个 x 最终通常是 3D 稀疏张量 或一个已经被展平/投影到 BEV 平面的特征图。
+        # 得到体素特征 (feats) 和对应的稀疏坐标 (coords)，然后进入特征编码阶段.中间编码器 (self.pts_middle_encoder)： 这通常是一个 稀疏卷积网络（如 PointPillar 或 VoxelNet 中的 3D 稀疏卷积）或者一个 2D 伪-体素网络。
+        #输入： 稀疏的体素特征和坐标。功能： 对稀疏体素空间进行特征提取和下采样。输出： 编码后的张量 x。对于 BEVFusion 来说，这个 x 最终通常是 3D 稀疏张量 或一个已经被展平/投影到 BEV 平面的特征图。
         x = self.pts_middle_encoder(feats, coords, batch_size) #N, (C * D), H, W
         return x
-
+    #  将批次中的每个点云样本独立地进行体素化，然后将结果合并成稀疏格式的张量，准备输入给后续的 3D 编码器 (pts_middle_encoder)
     @torch.no_grad()
     def voxelize(self, points):#将批次中的每个点云样本独立地进行体素化，然后将结果合并成稀疏格式的张量，准备输入给后续的 3D 编码器(就是后面哪个middle encoder)
         feats, coords, sizes = [], [], []
-        for k, res in enumerate(points): #遍历批次中的每个点云样本
-            ret = self.pts_voxel_layer(res)  #调用实际的体素化模块,对单个点云样本进行体素化，得到体素特征、坐标和大小（例如 Hard Voxelization 或 Dynamic Voxelization）
+        for k, res in enumerate(points): #遍历批次中的每个点云样本 points[0].shape:([168051, 3])
+            ret = self.pts_voxel_layer(res)  #调用实际的体素化模块,对单个点云样本进行体素化， 
+            # 输出：返回经过裁切的三个张量：1. voxels: 样本的有效体素点 (M max_points} C）。每个体素对应一组点（最多 10 个）不够全0填充，多的只保留前10
+            # 2. coors: 稀疏体素坐标 (M  3 的 (X, Y, Z) 索引)。3. num_points_per_voxel: 每个有效体素内的点数 M
             if len(ret) == 3: #Hard Voxelization：通常返回三个值：特征 ($f$)、体素坐标 ($c$)、每个体素内的点数 ($n$)。
                 # hard voxelize
-                f, c, n = ret
+                f, c, n = ret # ([52063, 10, 3])([52063, 3])([52063])
             else:                     #Dynamic Voxelization 或简化模式：返回特征和坐标
                 assert len(ret) == 2
                 f, c = ret
                 n = None
             feats.append(f)
-            coords.append(F.pad(c, (1, 0), mode="constant", value=k))  #添加 Batch 索引：c 包含体素的 $(Z, Y, X)$ 坐标。使用 F.pad 在坐标张量左侧填充一个值为 $k$（当前的批次索引 $k$）的新维度。这样，体素坐标 $c$ 就变成了稀疏张量所需的 $\boldsymbol{(B, Z, Y, X)}$ 格式，确保在合并后能区分不同样本的体素
-            if n is not None:
+            coords.append(F.pad(c, (1, 0), mode="constant", value=k))# pad:对c进行填充 (1,0)pad_left = 1：在最后一个维度的左侧补 1 个值（始终用 value=k）pad_right = 0：右侧不补 [Z, Y, X]->[batch_id,Z, Y, X]
+            if n is not None: 
                 sizes.append(n)
         #循环结束后，函数将所有样本的结果合并成稀疏表示所需的最终张量
         feats = torch.cat(feats, dim=0) #将所有样本的体素特征沿维度 0（体素索引）拼接起来
-        coords = torch.cat(coords, dim=0) #将所有样本的 $\boldsymbol{(B, Z, Y, X)}$ 坐标拼接起来
+        coords = torch.cat(coords, dim=0) #将所有样本的 {(B, Z, Y, X)}坐标拼接起来
         if len(sizes) > 0:
             sizes = torch.cat(sizes, dim=0) #如果存在，拼接所有样本的每个体素内的点数
-#对Hard Voxelization的输出，执行特征降维和归一化：在 Hard Voxelization 的常见实现中，feats 维度是 $\text{(体素总数, 单体素最大点数, 特征维度)}$。如果启用了 self.voxelize_reduce（通常用于 PointPillars 或简化 VoxelNet），它会对单个体素内所有点的特征进行求和（feats.sum(dim=1)）。然后，将求和结果除以该体素内的实际点数 (sizes)，相当于计算了该体素内所有点特征的平均值，作为该体素的最终特征。.contiguous() 确保内存连续性，为后续的稀疏卷积做准备
-            if self.voxelize_reduce:
-                feats = feats.sum(dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)
-                feats = feats.contiguous()
-
-        return feats, coords, sizes
+            #对Hard Voxelization的输出，执行特征降维和归一化：在 Hard Voxelization 的常见实现中，feats 维度是 {(体素总数, 单体素最大点数, 特征维度)}。
+            if self.voxelize_reduce:# 如果启用了 self.voxelize_reduce（通常用于 PointPillars 或简化 VoxelNet）
+                feats = feats.sum(dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)# sum是求和 keepdim=False → 求和后丢掉这一维 ([52063, 3])/([52063, 1]) 求和 → 每个体素内所有点特征相加 除以实际点数 → 每个体素特征取平均
+                feats = feats.contiguous() # 在内存中重新排布张量，使其变为连续存储
+        
+        return feats, coords, sizes # 体素特征、体素坐标以及每个体素的点数
 
     def predict(
         self, batch_inputs_dict: Dict[str, Optional[Tensor]], batch_data_samples: List[Det3DDataSample], **kwargs
@@ -363,19 +365,20 @@ class BEVFusion(Base3DDetector):
             )
             features.append(img_feature)
 
-        pts_feature = self.extract_pts_feat(batch_inputs_dict)
-        features.append(pts_feature)
-
-        if self.fusion_layer is not None:
-            x = self.fusion_layer(features)
+        pts_feature = self.extract_pts_feat(batch_inputs_dict) # ([1, 256, 180, 180]) 点云BEV特征
+        features.append(pts_feature) # features[0].shape： ([1, 80, 180, 180])图像BEV特征
+ 
+        if self.fusion_layer is not None: # concat → 3×3 卷积(336 → out_channels) → BN → ReLU
+            x = self.fusion_layer(features) #通道维度拼接后[1, 336, 180, 180]再经过卷积融合成 [1, 256, 180, 180]
         else:
             assert len(features) == 1, features
             x = features[0]
-
-        x = self.pts_backbone(x) #SECOND 由一系列降采样（Downsampling）和特征提取块 (blocks) 组成，这些块将 BEV 特征图逐渐缩小，并增加特征通道数
+        # EV 点云特征的主干网络（Backbone + FPN） 
+        x = self.pts_backbone(x) # x[0].shape([1, 128, 180, 180])  x[1].shape([1, 256, 90, 90])
+        #SECOND 由一系列降采样（Downsampling）和特征提取块 (blocks) 组成，这些块将 BEV 特征图逐渐缩小，并增加特征通道数
         x = self.pts_neck(x) #SECONDFPN 接收来自主干网络 (SECOND) 的多尺度 BEV 特征，通过上采样 (Upsampling) 将它们恢复到统一的高分辨率，并将它们拼接起来，生成最终的、信息丰富的 BEV 特征图
-
-        return x, depth_loss
+        # ([1, 128, 180, 180])->([1, 256, 180, 180]) ([1, 256, 90, 90])->([1, 256, 180, 180]) cat=([1, 512, 180, 180])
+        return x, depth_loss #([1, 512, 180, 180]) tensor(4.8567
 
     def loss(
         self, batch_inputs_dict: Dict[str, Optional[Tensor]], batch_data_samples: List[Det3DDataSample], **kwargs
